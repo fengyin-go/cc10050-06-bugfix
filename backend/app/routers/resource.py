@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
-from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
+from app.schemas import ActionPayload, ActionResult, CommandPayload, CommandResult, EntryPayload, PageResult
 from app.services import service_for
 
 router = APIRouter(prefix="/api", tags=["业务资源"])
@@ -96,3 +96,15 @@ def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResu
     service = require_service(module)
     entry, message = service.run_action(entry_id, payload.action.strip())
     return ActionResult(ok=entry is not None, message=message, entry=entry)
+
+
+@router.post("/{module}/commands", response_model=CommandResult)
+def run_command(module: str, payload: CommandPayload) -> CommandResult:
+    """领域命令入口：承载恢复、来源补核、别名并入等带参数的治理操作。"""
+    service = require_service(module)
+    result = service.run_command(payload.command.strip(), payload.entry_id, dict(payload.args))
+    return CommandResult(
+        ok=bool(result.get("ok", False)),
+        message=str(result.get("message", "")),
+        data=result,
+    )

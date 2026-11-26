@@ -1,6 +1,7 @@
 """模块服务基类：共享查询、登记、动作和统计骨架，业务差异留在各模块文件。"""
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from app.store import store
@@ -14,6 +15,8 @@ class BaseModuleService:
     STATUS_ORDER: list[str] = []
     ACTION_RULES: dict[str, str] = {}
     NEGATIVE_ACTIONS: list[str] = []
+    # 领域命令名 -> 服务方法名，用于承载带参数的业务治理操作（恢复、补核等）。
+    COMMANDS: dict[str, str] = {}
 
     def list_entries(
         self,
@@ -70,6 +73,31 @@ class BaseModuleService:
         entry["pending"] = target != self.STATUS_ORDER[-1]
         entry["abnormal"] = action in self.NEGATIVE_ACTIONS
         return entry, f"{self.ENTITY}已{action}"
+
+    def run_command(
+        self, command: str, entry_id: int | None, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """执行带参数的领域命令；命令名与方法名在各服务 COMMANDS 中登记。"""
+        method_name = self.COMMANDS.get(command)
+        if method_name is None:
+            return {"ok": False, "message": f"命令「{command}」不属于{self.MODULE}可执行范围"}
+        method = getattr(self, method_name, None)
+        if method is None:
+            return {"ok": False, "message": f"命令「{command}」未实现"}
+        kwargs = {k: v for k, v in payload.items() if k not in ("command", "entry_id")}
+        signature = inspect.signature(method)
+        accepts_kwargs = any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()
+        )
+        if not accepts_kwargs:
+            kwargs = {k: v for k, v in kwargs.items() if k in signature.parameters}
+        if "entry_id" in signature.parameters:
+            entry_param = signature.parameters["entry_id"]
+            entry_required = entry_param.default is inspect.Parameter.empty
+            if entry_required and entry_id is None:
+                return {"ok": False, "message": f"命令「{command}」需要指定记录 id"}
+            return method(entry_id, **kwargs)
+        return method(**kwargs)
 
     def domain_snapshot(self) -> dict[str, Any]:
         """输出模块级数据质量快照，供跨模块消费和题位源码锚点使用。"""

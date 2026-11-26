@@ -16,11 +16,33 @@ class ShopSiteService(BaseModuleService):
     MODULE = "shop_site"
     ENTITY = "站点配置"
     OPERATION_TERM = "采集"
-    LIST_FIELDS = ["站点名称", "站点域名", "采集区域", "语言标识", "生效货币"]
+    LIST_FIELDS = ["站点名称", "站点域名", "采集区域", "语言标识", "生效货币", "站点别名", "归属组别", "账目状态"]
     REQUIRED_FIELDS = ["站点名称", "站点域名", "采集区域"]
     STATUS_ORDER = ["待验证", "已验证", "已封禁"]
     ACTION_RULES = {"验证站点": "已验证", "封禁站点": "已封禁"}
     NEGATIVE_ACTIONS = ["封禁站点"]
+    COMMANDS = {
+        "并入别名": "merge_alias",
+        "归属转交": "transfer_attribution",
+        "解析记账站点": "resolve_account_command",
+    }
+
+    def __init__(self) -> None:
+        # 别名 -> 当前生效站点名（别名并入后的解析依据）
+        self._alias_map: dict[str, str] = {}
+        # 站点名 -> 可查看该站单次恢复依据的处理人
+        self._receipt_grants: dict[str, set[str]] = {}
+        # 归属转交留痕
+        self.transfer_log: list[dict[str, Any]] = []
+
+    def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+        entry, missing = super().create_entry(values)
+        if entry is None:
+            return entry, missing
+        entry["站点别名"] = str(values.get("站点别名", "") or "")
+        entry["归属组别"] = str(values.get("归属组别", "") or "")
+        entry["账目状态"] = "独立账目"
+        return entry
 
     # ---- 业务扩展：站点目录与采集范围治理 ----
 
@@ -126,8 +148,126 @@ class ShopSiteService(BaseModuleService):
             "原始HTML摘要": f"{domain} 首页基线快照",
             "抓取时间": datetime.now(timezone.utc).isoformat(),
             "样本指纹": f"fp-site-{entry_id}-{sid}",
+            "采集站点": entry.get("站点名称", ""),
+            "采集签收单": "",
+            "采集处理人": "",
             "status": "已保存",
             "pending": True,
             "abnormal": False,
         })
         return {"ok": True, "message": "站点基线样本已保存", "sample_id": sid}
+
+    # ---- 业务扩展：归属核对、别名并入与账目可追溯 ----
+
+    def merge_alias(self, entry_id: int, target_group: str = "", **_: Any) -> dict[str, Any]:
+        """更正站点归属：把该站别名并入指定区域组，旧名只作别名可回查。"""
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "message": f"{self.ENTITY} {entry_id} 不存在"}
+        group = target_group.strip()
+        if not group:
+            return {"ok": False, "message": "并入目标组别不能为空"}
+        alias = str(entry.get("站点名称", ""))
+        target = self._find_site_by_name(group)
+        if target is None:
+            # 目标组首次出现：建立组账目站点
+            rows = store.rows(self.MODULE)
+            new_id = max((int(r.get("id", 0)) for r in rows), default=0) + 1
+            target = {
+                "id": new_id,
+                "站点名称": group,
+                "站点域名": f"{group}.local",
+                "采集区域": group,
+                "语言标识": entry.get("语言标识", ""),
+                "生效货币": entry.get("生效货币", ""),
+                "站点别名": "",
+                "归属组别": group,
+                "账目状态": "组账目",
+                "status": "已验证",
+                "pending": False,
+                "abnormal": False,
+            }
+            rows.append(target)
+        self._alias_map[alias] = str(target.get("站点名称", ""))
+        entry["站点别名"] = alias
+        entry["归属组别"] = group
+        entry["账目状态"] = f"已并入{group}"
+        entry["pending"] = False
+        return {
+            "ok": True,
+            "message": f"站点 {alias} 的别名已并入 {group}",
+            "alias": alias,
+            "account_site": target.get("站点名称", ""),
+        }
+
+    def transfer_attribution(
+        self,
+        entry_id: int,
+        target_site: str = "",
+        handler: str = "",
+        **_: Any,
+    ) -> dict[str, Any]:
+        """归属转交：把站点产出账目转到目标可追溯站点，并登记单次查看授权。"""
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "message": f"{self.ENTITY} {entry_id} 不存在"}
+        target = self._find_site_by_name(target_site.strip())
+        if target is None:
+            return {"ok": False, "message": f"目标站点 {target_site} 不在站点目录，不能转交"}
+        source = str(entry.get("站点名称", ""))
+        if source == str(target.get("站点名称", "")):
+            return {"ok": False, "message": "目标站点与来源相同，无需转交"}
+        self._alias_map[source] = str(target.get("站点名称", ""))
+        entry["归属组别"] = str(target.get("归属组别", "") or target.get("站点名称", ""))
+        entry["账目状态"] = f"已转交{target.get('站点名称', '')}"
+        actor = handler.strip()
+        if actor:
+            self._receipt_grants.setdefault(source, set()).add(actor)
+        self.transfer_log.append({
+            "时间": datetime.now(timezone.utc).isoformat(),
+            "来源站点": source,
+            "目标站点": target.get("站点名称", ""),
+            "处理人": actor,
+        })
+        return {
+            "ok": True,
+            "message": f"归属已转交：{source} → {target.get('站点名称', '')}",
+            "account_site": target.get("站点名称", ""),
+        }
+
+    def resolve_account_site(self, site: str) -> str:
+        """把来源站点（含已并入的别名/已转交站点）解析为当前记账站点。"""
+        seen: set[str] = set()
+        current = site
+        while current in self._alias_map and current not in seen:
+            seen.add(current)
+            current = self._alias_map[current]
+        return current
+
+    def resolve_account_command(self, entry_id: int, **_: Any) -> dict[str, Any]:
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return {"ok": False, "message": f"{self.ENTITY} {entry_id} 不存在"}
+        source = str(entry.get("站点名称", ""))
+        account = self.resolve_account_site(source)
+        return {
+            "ok": True,
+            "message": f"{source} 当前记账站点为 {account}",
+            "source_site": source,
+            "account_site": account,
+        }
+
+    def receipt_view_granted(self, source_site: str, handler: str) -> bool:
+        """归属转交后，原处理人只能查看被授权的单次恢复依据。"""
+        if not handler:
+            return False
+        grants = self._receipt_grants.get(source_site, set())
+        account = self.resolve_account_site(source_site)
+        return handler in grants or handler in self._receipt_grants.get(account, set())
+
+    def _find_site_by_name(self, name: str) -> dict[str, Any] | None:
+        if not name:
+            return None
+        return next(
+            (r for r in store.rows(self.MODULE) if r.get("站点名称") == name), None
+        )

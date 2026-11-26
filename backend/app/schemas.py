@@ -29,3 +29,15 @@ class EntryPayload(BaseModel):
 class ActionPayload(BaseModel):
     action: str
     remark: str | None = None
+
+
+class CommandPayload(BaseModel):
+    command: str
+    entry_id: int | None = None
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class CommandResult(BaseModel):
+    ok: bool
+    message: str
+    data: dict[str, Any] | None = None

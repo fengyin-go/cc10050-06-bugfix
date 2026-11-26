@@ -8,18 +8,6 @@ export type EntryRow = {
   [field: string]: string | number | boolean
 }
 
-export type ModuleMeta = {
-  key: string
-  name: string
-  entity: string
-  desc: string
-  fields: string[]
-  statuses: string[]
-  actions: string[]
-  actionTargets: Record<string, string>
-  metrics: string[]
-}
-
 export type PageResult = {
   items: EntryRow[]
   total: number
@@ -30,9 +18,30 @@ export type PageResult = {
 export type ActionResult = {
   ok: boolean
   message: string
+  entry?: EntryRow
+}
+
+export type CommandResult = {
+  ok: boolean
+  message: string
+  data?: Record<string, unknown>
 }
 
 export type OverviewResult = {
   cards: { label: string; value: number }[]
   modules: { name: string; created: number; pending: number; abnormal: number }[]
+}
+
+export type ModuleMeta = {
+  key: string
+  name: string
+  entity: string
+  desc: string
+  fields: string[]
+  statuses: string[]
+  actions: string[]
+  actionTargets: Record<string, string>
+  metrics: string[]
+  /** 领域命令：带参数的治理操作（恢复、补核、别名并入等），走 commands 接口。 */
+  commands?: string[]
 }

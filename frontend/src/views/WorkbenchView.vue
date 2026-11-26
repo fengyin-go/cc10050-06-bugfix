@@ -9,6 +9,16 @@
         <button class="btn primary" data-testid="open-create" type="button" @click="openCreate">
           登记{{ meta.entity }}
         </button>
+        <button
+          v-for="command in pageCommands"
+          :key="command"
+          class="btn"
+          :data-testid="`page-command-${command}`"
+          type="button"
+          @click="openCommand(command)"
+        >
+          {{ command }}
+        </button>
         <button class="btn" data-testid="export" type="button" @click="exportRows">
           导出{{ meta.name }}清单
         </button>
@@ -60,6 +70,16 @@
             >
               {{ action }}
             </button>
+            <button
+              v-for="command in rowCommands"
+              :key="command"
+              class="link command-link"
+              type="button"
+              :data-testid="`command-${row.id}-${command}`"
+              @click="openCommand(command, row)"
+            >
+              {{ command }}
+            </button>
           </td>
         </tr>
         <tr v-if="!rows.length">
@@ -86,6 +106,30 @@
       </form>
     </div>
 
+    <div v-if="commandForm" class="modal-backdrop" data-testid="command-modal">
+      <form class="modal" @submit.prevent="submitCommand">
+        <h3>{{ commandForm.title }}</h3>
+        <p v-if="commandHint" class="command-hint">{{ commandHint }}</p>
+        <label v-for="field in commandFields" :key="field.key" class="create-field">
+          <span>{{ field.label }}</span>
+          <input
+            v-model="commandValues[field.key]"
+            :data-testid="`command-input-${field.key}`"
+            :placeholder="field.placeholder"
+            :readonly="isReadOnly(field)"
+            :class="{ readonly: isReadOnly(field) }"
+          />
+        </label>
+        <pre v-if="commandResult" class="command-result" :data-testid="commandResult.ok ? 'command-ok' : 'command-fail'">{{ formatResult(commandResult) }}</pre>
+        <div class="page-actions">
+          <button class="btn" type="button" @click="closeCommand">关闭</button>
+          <button class="btn primary" data-testid="submit-command" type="submit" :disabled="submitting">
+            {{ submitting ? '提交中…' : '确认执行' }}
+          </button>
+        </div>
+      </form>
+    </div>
+
     <footer class="page-foot">
       <span>共 {{ total }} 条{{ meta.name }}记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
@@ -102,8 +146,10 @@ import {
   listEntries,
   moduleMeta,
   runAction as applyAction,
+  runCommand as applyCommand,
 } from '@/api/backend-service'
-import type { EntryRow } from '@/data/types'
+import { COMMAND_FORMS, type CommandField } from '@/data/command-forms'
+import type { CommandResult, EntryRow } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()
 const meta = moduleMeta(props.moduleKey)
@@ -115,6 +161,13 @@ const filterFields = meta.fields.slice(0, 3)
 const showCreate = ref(false)
 const creating = ref(false)
 const createValues = ref<Record<string, string>>({})
+
+const activeCommand = ref('')
+const activeRow = ref<EntryRow | null>(null)
+const commandValues = ref<Record<string, string>>({})
+const submitting = ref(false)
+const commandResult = ref<CommandResult | null>(null)
+
 const stats = computed(() => [
   { label: meta.metrics[0], value: total.value },
   { label: meta.metrics[1], value: rows.value.filter((row) => row.status === meta.statuses[1]).length },
@@ -129,6 +182,21 @@ const statusSummary = computed(() =>
     count: rows.value.filter((row) => String(row.status) === status).length,
   })),
 )
+
+const rowCommands = computed(() =>
+  (meta.commands ?? []).filter((name) => COMMAND_FORMS[name]?.scope === 'row'),
+)
+const pageCommands = computed(() =>
+  (meta.commands ?? []).filter((name) => COMMAND_FORMS[name]?.scope === 'page'),
+)
+const commandForm = computed(() => (activeCommand.value ? COMMAND_FORMS[activeCommand.value] : null))
+const commandFields = computed<CommandField[]>(() => commandForm.value?.fields ?? [])
+const commandHint = computed(() => commandForm.value?.successHint ?? '')
+
+function isReadOnly(field: CommandField): boolean {
+  if (!field.readOnlyWhen || !activeRow.value) return false
+  return field.readOnlyWhen(activeRow.value as unknown as Record<string, unknown>)
+}
 
 function resetFilters() {
   filters.value = {}
@@ -176,6 +244,47 @@ async function runAction(action: string, row: EntryRow) {
   }
 }
 
+function openCommand(command: string, row?: EntryRow) {
+  activeCommand.value = command
+  activeRow.value = row ?? null
+  commandResult.value = null
+  const form = COMMAND_FORMS[command]
+  commandValues.value = Object.fromEntries(
+    form.fields.map((field) => [
+      field.key,
+      row && field.defaultValue ? field.defaultValue(row as unknown as Record<string, unknown>) : '',
+    ]),
+  )
+}
+
+function closeCommand() {
+  activeCommand.value = ''
+  activeRow.value = null
+  commandResult.value = null
+  commandValues.value = {}
+}
+
+async function submitCommand() {
+  submitting.value = true
+  errorMessage.value = ''
+  try {
+    const entryId = activeRow.value ? Number(activeRow.value.id) : undefined
+    commandResult.value = await applyCommand(meta.key, activeCommand.value, commandValues.value, entryId)
+    await reload()
+  } catch (error) {
+    commandResult.value = {
+      ok: false,
+      message: error instanceof Error ? error.message : '命令执行失败',
+    }
+  } finally {
+    submitting.value = false
+  }
+}
+
+function formatResult(result: CommandResult): string {
+  return JSON.stringify(result.data ?? result, null, 2)
+}
+
 async function reload() {
   errorMessage.value = ''
   try {
@@ -189,3 +298,34 @@ async function reload() {
 
 onMounted(reload)
 </script>
+
+<style scoped>
+.command-link {
+  color: #1d6fbf;
+}
+.command-hint {
+  margin: 0 0 8px;
+  color: #666;
+  font-size: 13px;
+}
+.command-result {
+  max-height: 260px;
+  overflow: auto;
+  background: #f6f8fa;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  padding: 10px;
+  font-size: 12px;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.command-result:not([data-testid='command-ok']) {
+  border-color: #e0a3a3;
+  background: #fdf3f3;
+}
+.readonly {
+  background: #f0f0f0;
+  color: #777;
+}
+</style>

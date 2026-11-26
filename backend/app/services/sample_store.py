@@ -16,11 +16,40 @@ class SampleStoreService(BaseModuleService):
     MODULE = "sample_store"
     ENTITY = "页面样本"
     OPERATION_TERM = "抓取"
-    LIST_FIELDS = ["样本批次", "站点名称", "原始HTML摘要", "抓取时间", "样本指纹"]
+    LIST_FIELDS = [
+        "样本批次", "站点名称", "原始HTML摘要", "抓取时间", "样本指纹",
+        "采集站点", "采集签收单", "采集处理人",
+    ]
     REQUIRED_FIELDS = ["样本批次", "站点名称", "原始HTML摘要"]
     STATUS_ORDER = ["已保存", "已解析", "已过期"]
     ACTION_RULES = {"标记解析": "已解析", "标记过期": "已过期"}
     NEGATIVE_ACTIONS = []
+
+    def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+        """登记样本同时固化可回查的采集归属：采集站点、采集签收单、采集处理人。"""
+        entry, missing = super().create_entry(values)
+        if entry is None:
+            return entry, missing
+        entry["采集站点"] = str(values.get("采集站点", "") or entry.get("站点名称", ""))
+        entry["采集签收单"] = str(values.get("采集签收单", "") or "")
+        entry["采集处理人"] = str(values.get("采集处理人", "") or "")
+        return entry
+
+    def collection_provenance(self, fingerprint: str) -> dict[str, Any] | None:
+        """按样本指纹回查采集归属，是失败隔离区补核来源的唯一可信依据。"""
+        sample = next(
+            (r for r in store.rows(self.MODULE) if r.get("样本指纹") == fingerprint), None
+        )
+        if sample is None or not sample.get("采集站点"):
+            return None
+        return {
+            "sample_id": sample.get("id"),
+            "fingerprint": fingerprint,
+            "source_site": str(sample.get("采集站点", "")),
+            "receipt_no": str(sample.get("采集签收单", "")),
+            "handler": str(sample.get("采集处理人", "")),
+            "captured_at": sample.get("抓取时间", ""),
+        }
 
     # ---- 业务扩展：样本留存与指纹去重 ----
 
@@ -105,6 +134,17 @@ class SampleStoreService(BaseModuleService):
                 "失败原因": f"批次 {batch} 超出容量",
                 "隔离时间": datetime.now(timezone.utc).isoformat(),
                 "重试次数": "0",
+                "来源签收单": sample.get("采集签收单", ""),
+                "来源站点": sample.get("采集站点", ""),
+                "收件站点": "",
+                "处理人": sample.get("采集处理人", ""),
+                "归属状态": "待确认",
+                "归属依据": "",
+                "记账站点": "",
+                "恢复凭据号": "",
+                "恢复计入": "否",
+                "待确认原因": "留存溢出隔离，恢复前需补核样本采集归属",
+                "待确认记录": [],
                 "status": "已丢弃",
                 "pending": False,
                 "abnormal": False,

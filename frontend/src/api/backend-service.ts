@@ -1,6 +1,6 @@
 import { request } from './client'
 import { moduleMeta } from '@/data/modules'
-import type { ActionResult, EntryRow, OverviewResult, PageResult } from '@/data/types'
+import type { ActionResult, CommandResult, EntryRow, OverviewResult, PageResult } from '@/data/types'
 
 export { moduleMeta }
 
@@ -33,6 +33,19 @@ export async function runAction(
   const response = await request(`/api/${key}/${id}/actions`, {
     method: 'POST',
     body: JSON.stringify({ action }),
+  })
+  return await response.json()
+}
+
+export async function runCommand(
+  key: string,
+  command: string,
+  args: Record<string, string | number> = {},
+  entryId?: number,
+): Promise<CommandResult> {
+  const response = await request(`/api/${key}/commands`, {
+    method: 'POST',
+    body: JSON.stringify({ command, entry_id: entryId ?? null, args }),
   })
   return await response.json()
 }

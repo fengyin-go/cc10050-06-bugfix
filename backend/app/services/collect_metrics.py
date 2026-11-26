@@ -21,6 +21,7 @@ class CollectMetricsService(BaseModuleService):
     STATUS_ORDER = ["正常", "量级波动", "断采"]
     ACTION_RULES = {"查看趋势": "量级波动", "忽略波动": "断采"}
     NEGATIVE_ACTIONS = ["忽略波动"]
+    COMMANDS = {"恢复产出明细": "recovery_output_detail"}
 
     # ---- 业务扩展：量级统计与健康度判定 ----
 
@@ -142,4 +143,44 @@ class CollectMetricsService(BaseModuleService):
             "parsed": latest.get("解析量", ""),
             "output": latest.get("产出量", ""),
             "status": latest.get("status", ""),
+        }
+
+    # ---- 业务扩展：按恢复凭据核对恢复产出的归属 ----
+
+    def recovery_output_detail(self, entry_id: int | None = None, **_: Any) -> dict[str, Any]:
+        """读取每笔恢复的归属和恢复凭据，核对产出是否按来源归属计入。
+
+        只统计 counted=True 的凭据；归属未确定的恢复保留在隔离区，不会出现在这里，
+        因此不会被下游累计成已归属产出。
+        """
+        from app.services import service_for
+        quarantine = service_for("failure_quarantine")
+        if quarantine is None:
+            return {"ok": False, "message": "失败隔离区服务不可用"}
+        receipts = [
+            r for r in quarantine.all_receipts()
+            if r.get("counted") and (entry_id is None or r.get("entry_id") == entry_id)
+        ]
+        per_site: dict[str, int] = {}
+        for receipt in receipts:
+            account_site = str(receipt.get("account_site", ""))
+            per_site[account_site] = per_site.get(account_site, 0) + 1
+        mismatches: list[dict[str, Any]] = []
+        for receipt in receipts:
+            row = next(
+                (m for m in store.rows(self.MODULE)
+                 if m.get("站点名称") == receipt.get("account_site")),
+                None,
+            )
+            if row is None:
+                mismatches.append({
+                    "receipt_no": receipt.get("receipt_no"),
+                    "reason": f"记账站点 {receipt.get('account_site')} 缺少指标账目",
+                })
+        return {
+            "ok": True,
+            "message": "恢复产出已按归属凭据核对",
+            "receipts": receipts,
+            "recovery_output_by_site": per_site,
+            "mismatches": mismatches,
         }
